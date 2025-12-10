@@ -1,0 +1,335 @@
+# PROMPT: Implementazione Google Ads Tracking per Next.js App Router
+
+Implementa il tracciamento Google Ads per questo progetto Next.js (App Router).
+
+## Requisiti:
+1. Tracciare **PageView** su tutte le pagine
+2. Tracciare **ViewContent** (view_item) sulle landing page che iniziano con `/gg-*`
+3. Tracciare **Purchase/Conversion** sulle thank you page che iniziano con `/ty/ty-gg-*`
+4. Il codice nazione viene estratto dal suffisso del path (es: `/gg-prodotto-hr` -> `hr`)
+5. Il valore della conversione deve essere dinamico (prezzo del prodotto)
+
+## File da creare:
+
+### 1. app/config/google-ads.ts
+```typescript
+// Google Ads Configuration by Country
+// Format: 'country_code': { conversionId: 'AW-XXXXXXXXX', conversionLabel: 'XXXXXXXXXXXXXX', currency: 'XXX' }
+// Example: 'hr': { conversionId: 'AW-123456789', conversionLabel: 'AbCdEfGhIjKlMnOp', currency: 'EUR' }
+
+export interface GoogleAdsCountryConfig {
+  conversionId: string;
+  conversionLabel: string;
+  currency: string;
+}
+
+export const GOOGLE_ADS_BY_COUNTRY: Record<string, GoogleAdsCountryConfig> = {
+  // Add your country configurations here
+  // 'hr': { conversionId: 'AW-XXXXXXXXX', conversionLabel: 'XXXXXXXXXXXXXX', currency: 'EUR' },
+  // 'it': { conversionId: 'AW-XXXXXXXXX', conversionLabel: 'XXXXXXXXXXXXXX', currency: 'EUR' },
+  // 'de': { conversionId: 'AW-XXXXXXXXX', conversionLabel: 'XXXXXXXXXXXXXX', currency: 'EUR' },
+};
+
+/**
+ * Extract country code from pathname
+ * Landing pages: /gg-productname-hr -> 'hr'
+ * Thank you pages: /ty/ty-gg-productname-hr -> 'hr'
+ */
+export function getCountryFromPath(pathname: string): string | null {
+  const match = pathname.match(/-([a-z]{2})$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
+ * Check if the current path is a Google Ads landing page (starts with /gg-)
+ */
+export function isGoogleAdsLanding(pathname: string): boolean {
+  return pathname.startsWith('/gg-');
+}
+
+/**
+ * Check if the current path is a Google Ads thank you page (starts with /ty/ty-gg-)
+ */
+export function isGoogleAdsThankYou(pathname: string): boolean {
+  return pathname.startsWith('/ty/ty-gg-');
+}
+
+/**
+ * Get Google Ads config for a specific country
+ */
+export function getGoogleAdsConfig(countryCode: string): GoogleAdsCountryConfig | null {
+  return GOOGLE_ADS_BY_COUNTRY[countryCode.toLowerCase()] || null;
+}
+
+/**
+ * Get the primary conversion ID (first one in the config, used for gtag initialization)
+ */
+export function getPrimaryConversionId(): string | null {
+  const countries = Object.keys(GOOGLE_ADS_BY_COUNTRY);
+  if (countries.length === 0) return null;
+  return GOOGLE_ADS_BY_COUNTRY[countries[0]].conversionId;
+}
+
+/**
+ * Get all unique conversion IDs (for loading multiple gtag configs if needed)
+ */
+export function getAllConversionIds(): string[] {
+  const ids = new Set<string>();
+  Object.values(GOOGLE_ADS_BY_COUNTRY).forEach(config => {
+    ids.add(config.conversionId);
+  });
+  return Array.from(ids);
+}
+```
+
+### 2. app/lib/google/gtag.ts
+```typescript
+import { GoogleAdsCountryConfig } from '@/app/config/google-ads';
+
+// Extend Window interface for gtag
+declare global {
+  interface Window {
+    dataLayer: unknown[];
+    gtag: (...args: unknown[]) => void;
+  }
+}
+
+/**
+ * Track Google Ads page view event
+ */
+export function trackGoogleAdsPageView(conversionId: string): void {
+  if (typeof window === 'undefined' || !window.gtag) {
+    console.warn('[Google Ads] gtag not loaded yet');
+    return;
+  }
+
+  window.gtag('event', 'page_view', {
+    send_to: conversionId,
+  });
+  console.log('[Google Ads] PageView tracked');
+}
+
+/**
+ * Track Google Ads view content event (for landing pages)
+ */
+export function trackGoogleAdsViewContent(config: GoogleAdsCountryConfig): void {
+  if (typeof window === 'undefined' || !window.gtag) {
+    console.warn('[Google Ads] gtag not loaded yet');
+    return;
+  }
+
+  window.gtag('event', 'view_item', {
+    send_to: `${config.conversionId}/${config.conversionLabel}`,
+    currency: config.currency,
+  });
+  console.log('[Google Ads] ViewContent tracked for:', config.conversionId);
+}
+
+/**
+ * Track Google Ads conversion (purchase) event
+ */
+export function trackGoogleAdsConversion(
+  config: GoogleAdsCountryConfig,
+  value: number,
+  transactionId?: string
+): void {
+  if (typeof window === 'undefined' || !window.gtag) {
+    console.warn('[Google Ads] gtag not loaded yet');
+    return;
+  }
+
+  window.gtag('event', 'conversion', {
+    send_to: `${config.conversionId}/${config.conversionLabel}`,
+    value: value,
+    currency: config.currency,
+    transaction_id: transactionId || `txn_${Date.now()}`,
+  });
+  console.log('[Google Ads] Conversion tracked:', {
+    conversionId: config.conversionId,
+    value,
+    currency: config.currency,
+  });
+}
+
+/**
+ * Initialize gtag script
+ */
+export function initGtagScript(conversionIds: string[]): string {
+  if (conversionIds.length === 0) return '';
+
+  const primaryId = conversionIds[0];
+  const additionalConfigs = conversionIds.slice(1).map(id => `gtag('config', '${id}');`).join('\n');
+
+  return `
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', '${primaryId}');
+    ${additionalConfigs}
+    console.log('[Google Ads] Initialized with IDs:', ${JSON.stringify(conversionIds)});
+  `;
+}
+```
+
+### 3. app/components/GoogleAdsPixel.tsx
+```typescript
+'use client';
+
+import { useEffect } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+import Script from 'next/script';
+import {
+  getAllConversionIds,
+  getCountryFromPath,
+  getGoogleAdsConfig,
+  isGoogleAdsLanding,
+  isGoogleAdsThankYou,
+} from '@/app/config/google-ads';
+import {
+  initGtagScript,
+  trackGoogleAdsPageView,
+  trackGoogleAdsViewContent,
+  trackGoogleAdsConversion,
+} from '@/app/lib/google/gtag';
+
+export default function GoogleAdsPixel() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // Get all conversion IDs for initialization
+  const conversionIds = getAllConversionIds();
+  const primaryConversionId = conversionIds[0] || null;
+
+  useEffect(() => {
+    // Don't track if no conversion IDs are configured
+    if (!primaryConversionId) {
+      return;
+    }
+
+    // Wait for gtag to be available
+    const waitForGtag = setInterval(() => {
+      if (typeof window !== 'undefined' && typeof window.gtag === 'function') {
+        clearInterval(waitForGtag);
+
+        // Track PageView on all pages
+        trackGoogleAdsPageView(primaryConversionId);
+
+        // Get country from path
+        const countryCode = getCountryFromPath(pathname);
+
+        // If on a Google Ads landing page (/gg-*), track ViewContent
+        if (isGoogleAdsLanding(pathname) && countryCode) {
+          const config = getGoogleAdsConfig(countryCode);
+          if (config) {
+            console.log('[Google Ads] Landing page detected, tracking ViewContent...');
+            trackGoogleAdsViewContent(config);
+          } else {
+            console.warn(`[Google Ads] No config found for country: ${countryCode}`);
+          }
+        }
+
+        // If on a Google Ads thank you page (/ty/ty-gg-*), track Conversion (Purchase)
+        if (isGoogleAdsThankYou(pathname) && countryCode) {
+          const config = getGoogleAdsConfig(countryCode);
+          if (config) {
+            console.log('[Google Ads] Thank you page detected, tracking Conversion...');
+
+            // Get value from URL params or localStorage
+            let value = 0;
+            const priceParam = searchParams.get('price');
+            if (priceParam) {
+              value = parseFloat(priceParam);
+            } else if (typeof window !== 'undefined') {
+              // Try to get from localStorage (set by the landing page)
+              const storedPrice = localStorage.getItem('gg_purchase_value');
+              if (storedPrice) {
+                value = parseFloat(storedPrice);
+              }
+            }
+
+            // Get transaction ID from URL or generate one
+            const transactionId = searchParams.get('txn') || `txn_${Date.now()}`;
+
+            if (value > 0) {
+              trackGoogleAdsConversion(config, value, transactionId);
+            } else {
+              console.warn('[Google Ads] No value found for conversion tracking');
+            }
+          } else {
+            console.warn(`[Google Ads] No config found for country: ${countryCode}`);
+          }
+        }
+      }
+    }, 100);
+
+    // Cleanup after 10 seconds if gtag never loads
+    const timeout = setTimeout(() => clearInterval(waitForGtag), 10000);
+
+    return () => {
+      clearInterval(waitForGtag);
+      clearTimeout(timeout);
+    };
+  }, [pathname, searchParams, primaryConversionId]);
+
+  // Don't render anything if no conversion IDs are configured
+  if (!primaryConversionId) {
+    return null;
+  }
+
+  return (
+    <>
+      {/* Google Ads gtag.js */}
+      <Script
+        id="google-ads-gtag-js"
+        strategy="afterInteractive"
+        src={`https://www.googletagmanager.com/gtag/js?id=${primaryConversionId}`}
+      />
+      <Script
+        id="google-ads-gtag-init"
+        strategy="afterInteractive"
+        dangerouslySetInnerHTML={{
+          __html: initGtagScript(conversionIds),
+        }}
+      />
+    </>
+  );
+}
+```
+
+### 4. Aggiorna app/layout.tsx
+Aggiungi l'import e il componente:
+```typescript
+import GoogleAdsPixel from "./components/GoogleAdsPixel";
+
+// Nel body, dopo FacebookPixel (se presente):
+<GoogleAdsPixel />
+```
+
+## Struttura file risultante:
+```
+app/
+├── config/
+│   └── google-ads.ts          # Configurazione per paese
+├── lib/
+│   └── google/
+│       └── gtag.ts            # Helper functions per gtag
+├── components/
+│   └── GoogleAdsPixel.tsx     # Componente client per tracking
+└── layout.tsx                 # Aggiornato con GoogleAdsPixel
+```
+
+## Come usare:
+1. Modifica `GOOGLE_ADS_BY_COUNTRY` in `google-ads.ts` aggiungendo le configurazioni per ogni paese
+2. Per passare il valore della conversione alla thank you page:
+   - Via URL param: `/ty/ty-gg-product-hr?price=99.99&txn=ORDER123`
+   - Via localStorage: `localStorage.setItem('gg_purchase_value', '99.99')` nella landing page
+
+## Eventi tracciati:
+- **page_view**: Su tutte le pagine (con conversion ID primario)
+- **view_item**: Sulle landing page `/gg-*` (ViewContent)
+- **conversion**: Sulle thank you page `/ty/ty-gg-*` (Purchase)
+
+## Note:
+- Il componente non renderizza nulla se non ci sono conversion ID configurati
+- I log in console aiutano a debuggare il tracking in sviluppo
+- Non modificare il codice esistente di Facebook Pixel o API calls
