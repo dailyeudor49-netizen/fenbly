@@ -172,10 +172,12 @@ export function initGtagScript(conversionIds: string[]): string {
 ```
 
 ### 3. app/components/GoogleAdsPixel.tsx
+**IMPORTANTE: useSearchParams() deve essere wrappato in Suspense per compatibilita con Vercel/Next.js**
+
 ```typescript
 'use client';
 
-import { useEffect } from 'react';
+import { Suspense, useEffect } from 'react';
 import { usePathname, useSearchParams } from 'next/navigation';
 import Script from 'next/script';
 import {
@@ -192,7 +194,8 @@ import {
   trackGoogleAdsConversion,
 } from '@/app/lib/google/gtag';
 
-export default function GoogleAdsPixel() {
+// Componente interno che usa useSearchParams - DEVE essere wrappato in Suspense
+function GoogleAdsTracker() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
@@ -271,6 +274,15 @@ export default function GoogleAdsPixel() {
     };
   }, [pathname, searchParams, primaryConversionId]);
 
+  return null;
+}
+
+// Componente principale esportato
+export default function GoogleAdsPixel() {
+  // Get all conversion IDs for initialization
+  const conversionIds = getAllConversionIds();
+  const primaryConversionId = conversionIds[0] || null;
+
   // Don't render anything if no conversion IDs are configured
   if (!primaryConversionId) {
     return null;
@@ -291,6 +303,10 @@ export default function GoogleAdsPixel() {
           __html: initGtagScript(conversionIds),
         }}
       />
+      {/* IMPORTANTE: Suspense boundary richiesto per useSearchParams in Next.js */}
+      <Suspense fallback={null}>
+        <GoogleAdsTracker />
+      </Suspense>
     </>
   );
 }
@@ -314,7 +330,7 @@ app/
 │   └── google/
 │       └── gtag.ts            # Helper functions per gtag
 ├── components/
-│   └── GoogleAdsPixel.tsx     # Componente client per tracking
+│   └── GoogleAdsPixel.tsx     # Componente client per tracking (con Suspense)
 └── layout.tsx                 # Aggiornato con GoogleAdsPixel
 ```
 
@@ -329,7 +345,9 @@ app/
 - **view_item**: Sulle landing page `/gg-*` (ViewContent)
 - **conversion**: Sulle thank you page `/ty/ty-gg-*` (Purchase)
 
-## Note:
+## Note importanti:
+- **Suspense boundary obbligatorio**: `useSearchParams()` DEVE essere wrappato in `<Suspense>` per evitare errori di build su Vercel
 - Il componente non renderizza nulla se non ci sono conversion ID configurati
 - I log in console aiutano a debuggare il tracking in sviluppo
 - Non modificare il codice esistente di Facebook Pixel o API calls
+- Compatibile con Next.js 14+ e Vercel
